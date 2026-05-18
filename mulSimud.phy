@@ -1,0 +1,217 @@
+import pandas as pd
+import numpy as np
+import random
+
+# =====================
+# 設定
+# =====================
+input_file = "Mut.txt"
+
+n_children = 4
+n_generations = 4
+n_simulations = 100
+
+random_seed = 2
+random.seed(random_seed)
+np.random.seed(random_seed)
+
+# =====================
+# Mut.txt読み込み
+# =====================
+mut_df = pd.read_csv(input_file, sep="\t")
+
+site_cols = [c for c in mut_df.columns if c.startswith("Site")]
+
+for c in site_cols:
+    mut_df[c] = mut_df[c].astype(int)
+
+mutation_ids = mut_df["MutationID"].astype(str).values
+fm_weights = mut_df["FM"].astype(float).values
+
+# =====================
+# Site情報をbit化
+# =====================
+site_bits = []
+
+for _, row in mut_df.iterrows():
+    bit = 0
+    for i, site in enumerate(site_cols):
+        if row[site] == 1:
+            bit |= (1 << i)
+    site_bits.append(bit)
+
+site_bits = np.array(site_bits, dtype=np.uint64)
+
+# 各変異の両端siteを事前計算
+mutation_edges = []
+
+for bit in site_bits:
+    sites = [i for i in range(len(site_cols)) if bit & (np.uint64(1) << np.uint64(i))]
+
+    if len(sites) == 0:
+        mutation_edges.append((None, None))
+    else:
+        mutation_edges.append((min(sites), max(sites)))
+
+# =====================
+# Node定義
+# =====================
+class CellNode:
+    def __init__(self, subclone_id, muts=None, occupied=0):
+        self.subclone_id = subclone_id
+        # mutsは [(MutationID, bit), ...] として保持
+        self.muts = muts or []
+        self.occupied = occupied
+        self.children = []
+        self.allele_id = None
+
+    def to_newick(self):
+        """
+        内部ノード名は出力しない。
+        terminal leaf のみ AlleleID を出力する。
+        """
+        if not self.children:
+            return self.allele_id
+
+        return "(" + ",".join(child.to_newick() for child in self.children) + ")"
+
+# =====================
+# 1回分の変異選択
+# 条件：
+# - 新規変異の両端siteが未編集なら発生可能
+# - 内部siteが既存変異とoverlapしていてもよい
+# =====================
+def choose_mutation(parent):
+    compatible_indices = []
+
+    for i, bit in enumerate(site_bits):
+        left, right = mutation_edges[i]
+
+        if left is None:
+            continue
+
+        left_mask = np.uint64(1) << np.uint64(left)
+        right_mask = np.uint64(1) << np.uint64(right)
+
+        # 両端siteが未編集なら発生可能
+        if (parent.occupied & left_mask) == 0 and (parent.occupied & right_mask) == 0:
+            compatible_indices.append(i)
+
+    if len(compatible_indices) == 0:
+        return None, None
+
+    compatible_indices = np.array(compatible_indices)
+
+    weights = fm_weights[compatible_indices]
+    weights = weights / weights.sum()
+
+    idx = np.random.choice(compatible_indices, p=weights)
+
+    return mutation_ids[idx], site_bits[idx]
+
+# =====================
+# シミュレーション
+# =====================
+all_records = []
+
+for sim in range(1, n_simulations + 1):
+
+    clone_id = f"c{sim}"
+
+    root = CellNode(
+        subclone_id=f"{clone_id}-root",
+        muts=[],
+        occupied=np.uint64(0)
+    )
+
+    current = [root]
+    subclone_counter = 1
+
+    for gen in range(1, n_generations + 1):
+
+        next_cells = []
+
+        for parent in current:
+
+            for child_i in range(1, n_children + 1):
+
+                mut_id, mut_bit = choose_mutation(parent)
+
+                if mut_id is None:
+                    new_muts = parent.muts.copy()
+                    new_occupied = parent.occupied
+
+                else:
+                    # 新規変異とoverlapした過去のMutationIDを削除
+                    remaining_muts = [
+                        (old_id, old_bit)
+                        for old_id, old_bit in parent.muts
+                        if (old_bit & mut_bit) == 0
+                    ]
+
+                    # 新規変異を追加
+                    new_muts = remaining_muts + [(mut_id, mut_bit)]
+
+                    # occupiedを再計算
+                    new_occupied = np.uint64(0)
+                    for _, b in new_muts:
+                        new_occupied |= b
+
+                child = CellNode(
+                    subclone_id=f"{clone_id}-{subclone_counter}",
+                    muts=new_muts,
+                    occupied=new_occupied
+                )
+
+                parent.children.append(child)
+                next_cells.append(child)
+
+                subclone_counter += 1
+
+        current = next_cells
+
+    # =====================
+    # 最終Allele情報
+    # =====================
+    for allele_i, leaf in enumerate(current, start=1):
+
+        allele_id = f"Allele{allele_i}"
+        leaf.allele_id = allele_id
+
+        all_records.append({
+            "Simulation": sim,
+            "CloneID": clone_id,
+            "SubCloneID": leaf.subclone_id,
+            "AlleleID": allele_id,
+            "Mutations": ",".join([m[0] for m in leaf.muts])
+        })
+
+    # =====================
+    # Tree出力
+    # =====================
+    with open(f"Tree_{clone_id}.dnd", "w") as f:
+        f.write(root.to_newick() + ";\n")
+
+# =====================
+# 全simulationを1ファイルに出力
+# =====================
+out_df = pd.DataFrame(
+    all_records,
+    columns=[
+        "Simulation",
+        "CloneID",
+        "SubCloneID",
+        "AlleleID",
+        "Mutations"
+    ]
+)
+
+out_df.to_csv(
+    "All_Allele_Mutations.txt",
+    sep="\t",
+    index=False
+)
+
+print("DONE")
+print("Saved: All_Allele_Mutations.txt")
+print("Saved: Tree_c1.dnd, Tree_c2.dnd, ...")

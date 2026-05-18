@@ -1,0 +1,200 @@
+import numpy as np
+import pandas as pd
+import os
+from Bio import Phylo
+from Bio.Phylo.BaseTree import Clade
+from scipy.cluster.hierarchy import linkage, to_tree
+from scipy.spatial.distance import squareform
+
+def generate_allele_mut_map(reference_seq, aline_file, seed=None):
+    if seed is not None:
+        np.random.seed(seed)
+
+    with open(aline_file) as f:
+        lines = [line.strip().split() for line in f.readlines()]
+    pos_labels = lines[0][1:]
+    integer_pos_labels = [pos_labels[i] for i, lbl in enumerate(pos_labels) if "(" not in lbl]
+    insertion_pos_labels = [lbl for lbl in pos_labels if "(" in lbl]
+
+    allele_ids = [line[0][:-1] for line in lines[1:]]
+    data_lines = [line[1:] for line in lines[1:]]
+
+    sampled_pos = np.random.choice(integer_pos_labels, size=len(integer_pos_labels), replace=True)
+    sampled_pos_sorted = sorted(sampled_pos, key=lambda x: int(x))
+
+    mutation_registry = {}
+    mutation_id_counter = 1
+    allele_mut_map = {}
+
+    for allele_id, data in zip(allele_ids, data_lines):
+        mut_ids = []
+        current_type = None
+        current_content = []
+        for pos_label in sampled_pos_sorted:
+            idx = pos_labels.index(pos_label)
+            base = data[idx]
+            ref = reference_seq[int(pos_label)-1]
+            t = None
+            if base == "-":
+                t = "DEL"
+            elif base != ref:
+                t = "REP"
+
+            if t:
+                if current_type == t:
+                    current_content.append((pos_label, ref, base))
+                else:
+                    if current_content:
+                        key = (current_type, tuple(current_content))
+                        if key not in mutation_registry:
+                            mutation_registry[key] = f"Mut{mutation_id_counter}"
+                            mutation_id_counter += 1
+                        mut_ids.append(mutation_registry[key])
+                    current_type = t
+                    current_content = [(pos_label, ref, base)]
+            else:
+                if current_content:
+                    key = (current_type, tuple(current_content))
+                    if key not in mutation_registry:
+                        mutation_registry[key] = f"Mut{mutation_id_counter}"
+                        mutation_id_counter += 1
+                    mut_ids.append(mutation_registry[key])
+                    current_type = None
+                    current_content = []
+
+        if current_content:
+            key = (current_type, tuple(current_content))
+            if key not in mutation_registry:
+                mutation_registry[key] = f"Mut{mutation_id_counter}"
+                mutation_id_counter += 1
+            mut_ids.append(mutation_registry[key])
+
+        # 挿入 (X.1) の処理
+        for pos_label in sampled_pos_sorted:
+            ins_label = f"({pos_label}.1)"
+            if ins_label in pos_labels:
+                idx = pos_labels.index(ins_label)
+                ins_base = data[idx]
+                if ins_base != "-":
+                    key = ("INS", pos_label, ins_base)
+                    if key not in mutation_registry:
+                        mutation_registry[key] = f"Mut{mutation_id_counter}"
+                        mutation_id_counter += 1
+                    mut_ids.append(mutation_registry[key])
+
+        allele_mut_map[allele_id] = set(mut_ids)
+
+    return allele_mut_map
+
+def build_and_simplify_trees(output_dir, allele_mut_map, suffix):
+    total_alleles = len(allele_mut_map)
+    fm_counter = {}
+    for muts in allele_mut_map.values():
+        for m in muts:
+            fm_counter[m] = fm_counter.get(m, 0) + 1
+    fm_weights = {m: fm_counter[m] / total_alleles for m in fm_counter}
+
+    for clone_name in os.listdir(output_dir):
+        clone_dir = os.path.join(output_dir, clone_name)
+        clone_file = os.path.join(clone_dir, "Clone.txt")
+        if not os.path.isfile(clone_file):
+            continue
+
+        print(f"▶️ 処理中: {clone_name}")
+        clone_df = pd.read_csv(clone_file, sep="\t")
+        allele_list = clone_df["AlleleID"].tolist()
+
+        if len(allele_list) < 2:
+            print(f"⚠️ スキップ（アレル数が少ない）: {clone_name}")
+            continue
+
+        clone_mut_map = {aid: allele_mut_map.get(aid, set()) for aid in allele_list}
+
+        N_clone = len(allele_list)
+        cm_counter = {}
+        for muts in clone_mut_map.values():
+            for m in muts:
+                cm_counter[m] = cm_counter.get(m, 0) + 1
+        cm_weights = {m: cm_counter[m] / N_clone for m in cm_counter}
+
+        dist_mat = np.zeros((N_clone, N_clone))
+        for i, a in enumerate(allele_list):
+            for j, b in enumerate(allele_list):
+                if i < j:
+                    s1, s2 = clone_mut_map[a], clone_mut_map[b]
+                    all_muts = s1 | s2
+                    inter = s1 & s2
+
+                    def weight(m):
+                        cm = cm_weights.get(m, 0)
+                        fm = fm_weights.get(m, 0)
+                        diff = cm - fm
+                        return diff if diff > 0 else 1 / N_clone
+
+                    num = sum(weight(m) for m in inter)
+                    den = sum(weight(m) for m in all_muts)
+                    d = 1 - num / den if den > 0 else 1.0
+                    dist_mat[i, j] = d
+                    dist_mat[j, i] = d
+
+        linked = linkage(squareform(dist_mat), method='average')
+        root = to_tree(linked)
+
+        def build_clade(node):
+            if node.is_leaf():
+                return Clade(name=allele_list[node.id], branch_length=node.dist)
+            return Clade(branch_length=node.dist, clades=[
+                build_clade(node.get_left()), build_clade(node.get_right())
+            ])
+
+        tree = build_clade(root)
+        out_file = os.path.join(clone_dir, f"Poly{suffix}.dnd")
+        simplify_and_output(tree, clone_mut_map, out_file)
+
+def simplify_and_output(tree, allele_mut_map, out_file):
+    def compute_common_mutations(clade):
+        if clade.is_terminal():
+            clade.common_mutations = allele_mut_map.get(clade.name, set())
+        else:
+            child_sets = [compute_common_mutations(c) for c in clade.clades]
+            clade.common_mutations = set.intersection(*child_sets) if child_sets else set()
+        return clade.common_mutations
+
+    def simplify_tree(clade):
+        new_children = []
+        for c in clade.clades:
+            simplify_tree(c)
+            if not c.is_terminal() and c.common_mutations == clade.common_mutations:
+                new_children.extend(c.clades)
+            else:
+                new_children.append(c)
+        clade.clades = new_children
+
+    def to_newick(clade):
+        if not clade.clades:
+            return clade.name
+        children_str = ",".join(to_newick(c) for c in clade.clades)
+        return f"({children_str})"
+
+    compute_common_mutations(tree)
+    simplify_tree(tree)
+    newick = to_newick(tree) + ";"
+    with open(out_file, "w") as f:
+        f.write(newick + "\n")
+
+# 実行部分
+if __name__ == "__main__":
+    reference_seq = "GAGTCGAGACGCTGACGATACCTTAGTCGACGTGCGCGCTCTCTGACGACTGCACGAAAGTCGACGAAGGGATAGTATGCGTACACGCGACCTTCGTCTGCGCGCTACGTATCACTGGAGAGCGCGCTCGACGACTAAGGATGAGACATGCAGCCACATCCCTTCGTCGTCTGTCGTGCAGTCTCAGGATACGTAGCACGGAGACGAAGG"
+    aline_file = "Aline_visual.txt"
+    output_dir = "Output"
+    N_BOOTSTRAP = 100
+
+    for i in range(1, N_BOOTSTRAP + 1):
+        print(f"\n🌀 Bootstrap {i} 実行中...")
+        allele_mut_map = generate_allele_mut_map(reference_seq, aline_file, seed=i)
+        build_and_simplify_trees(output_dir, allele_mut_map, suffix=i)
+
+    print("\n✅ Bootstrap Poly1.dnd 〜 PolyN.dnd の出力が完了しました。")
+
+
+
