@@ -27,4 +27,6 @@ allele_visualization.xlsx, Poly.dnd, Node_28param_with_depth.txt, Poly_correct_p
 
 Sample input files illustrating the required format can be downloaded from this page.
 
+non-standard hardware is not requested.
+
 
