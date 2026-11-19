@@ -77,6 +77,7 @@ The original README reports these output files:
 - Poly_correct_parent_branches.svg
 Output names and successful execution should be validated with the complete set of scripts and example inputs.
 
+The analysis of the provided mini dataset (`B4.fastq.gz`) completes within a few minutes on a standard desktop computer.
 
 Part V — References
 - Shen W, Le S, Li Y, Hu F. SeqKit: A cross-platform and ultrafast toolkit for FASTA/Q file manipulation. PLoS ONE. 2016;11:e0163962. https://doi.org/10.1371/journal.pone.0163962
