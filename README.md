@@ -33,7 +33,7 @@ The CPTracer pipeline was run on the following operating system and Conda/Python
 - Other tested operating systems: None reported
 Compatibility with other operating systems or Python versions has not been evaluated.
 Hardware requirements
-No specialized or non-standard hardware is required, according to the original README. Sufficient storage and memory are necessary for the FASTQ files and downstream intermediate data. Minimum RAM, CPU, and disk requirements have not been benchmarked or documented.
+No specialized or non-standard hardware is required, according to the original README. Sufficient storage and memory are necessary for the FASTQ files and downstream intermediate data. Minimum RAM, CPU, and disk requirements have not been benchmarked or documented.No additional installation is required for the code provided in this repository, apart from the third-party software listed under System requirements.
 
 
 Part II — Overview
